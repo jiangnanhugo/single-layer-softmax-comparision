@@ -1,2 +1,1 @@
-# single-layer-softmax-comparision
-single layer softmax comparision
+we compare single layer cHSM and p-tHSM on gpu , to evaluate its performance on time.
