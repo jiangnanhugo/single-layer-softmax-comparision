@@ -1,11 +1,8 @@
 from theano.tensor.shared_randomstreams import RandomStreams
-
-
-
 from level_softmax import level_softmax
 from updates import *
 
-class RNNLM:
+class RNNLM(object):
     def __init__(self,n_input,n_output,optimizer='sgd'):
         self.x=T.imatrix('batched_sequence_x')  # n_batch, maxlen
         self.y=T.imatrix('batched_sequence_y')
@@ -22,12 +19,10 @@ class RNNLM:
         self.optimizer=optimizer
         self.n_batch=T.iscalar('n_batch')
 
-        self.epsilon=1.0e-15
         self.rng=RandomStreams(1234)
         self.build()
 
     def build(self):
-
         output_layer=level_softmax(self.n_input,self.n_output,self.E[self.x,:],self.y)
         self.params=[self.E,]
         self.params+=output_layer.params
@@ -37,11 +32,12 @@ class RNNLM:
         gparams=[T.clip(T.grad(cost,p),-10,10) for p in self.params]
         updates=sgd(self.params,gparams,lr)
 
-
-
         self.train=theano.function(inputs=[self.x,self.y,self.y_mask,lr],
                                    outputs=cost,
                                    updates=updates)
+
+        self.forward = theano.function(inputs=[self.x, self.y,self.y_mask],
+                                     outputs=cost)
 
 
     def categorical_crossentropy(self,y_pred):

@@ -20,170 +20,72 @@ class Softmaxlayer(object):
         y_pred,_=theano.scan(fn=_step,sequences=self.X)
         self.activation=T.nnet.categorical_crossentropy(y,y_pred*maskY)
 
-class TreeNode(object):
-    def __init__(self,index=None,left=None,right=None,parent=None,parent_choice=None):
-        self.index=index
-        self.right=right
-        self.left=left
-        self.parent=parent
-        self.parent_choice=parent_choice
-
-    def __repr__(self):
-        return '<'+str(self.index)+', 0:'+str(self.left.index)+', 1:'+str(self.right.index)+'>'
-
-class RessultNode(object):
-    def __init__(self,value=None,parent=None):
-        self.value=value
-        self.parent=parent
-        self.index='res:'+str(self.value)
-
-    def __repr__(self):
-        return '<'+str(self.value)+'>'
-
-def build_binary_tree(values):
-    current_layer=[]
-    for v in values:
-        current_layer.append(RessultNode(value=v))
-    layers=[current_layer,]
-    count=0
-    while(len(current_layer) > 1):
-        pairs=[]
-        if len(current_layer) > 1:
-            while(len(current_layer)>1):
-                pairs.append(current_layer[:2])
-                current_layer=current_layer[2:]
-        else:
-            pairs=[current_layer]
-            current_layer=[]
-        new_layer=[]
-        for p in pairs:
-            tn=TreeNode(index=count,left=p[0],right=p[1])
-            count+=1
-            p[0].parent=tn
-            p[0].parent_choice=-1
-            p[1].parent=tn
-            p[1].parent_choice=1
-            new_layer.append(tn)
-        if len(current_layer)>0:
-            new_layer.extend(current_layer)
-            current_layer=[]
-        layers.append(new_layer)
-        current_layer=new_layer
-
-    return layers
 
 class H_Softmax(object):
 
-    def __init__(self,shape,
-                 x,y,maskY):
+    def __init__(self,shape,x,y_node,y_choice,y_bit_mask,maskY,mode='vector'):
         self.prefix='h_softmax_'
 
         self.in_size,self.out_size=shape
-        # in_size:size,mb_size=out_size
+        # in_size:hidden_size,out_size: vocabulary_size
         self.x=x
-        self.y=y
+        self.y_node=y_node
+        self.y_choice=y_choice
+        self.y_bit_mask=y_bit_mask
         self.maskY=maskY
         self.rng=np.random.RandomState(12345)
-        self.tree=build_binary_tree(range(self.out_size))
-        # Make route
-        self.build_route()
-        self.build_graph()
-        self.build_predict()
+        wp_val = np.asarray(self.rng.uniform(low=-np.sqrt(6. / (self.in_size)),
+                                             high=np.sqrt(6. / (self.in_size + 2)),
+                                             size=(self.out_size, self.in_size)), dtype=theano.config.floatX)
+        self.wp_matrix = theano.shared(value=wp_val, name="V_soft", borrow=True)
+        init_b = np.zeros((self.out_size,), dtype=theano.config.floatX)
+        self.bias=theano.shared(value=init_b,name='bias',borrow=True)
 
-    def build_route(self):
-        self.nodes=[]
-        self.node_dict={}
-        self.result_dict={}
-        self.routes=[]
+        self.params = [self.wp_matrix, self.bias]
+        if mode=='matrix':
+            self.matrix_build()
+        elif mode == 'vector':
+            self.vector_build()
 
-        self.label_count=0
-        self.node_count=0
-        for layer in self.tree:
-            for node in layer:
-                if isinstance(node,TreeNode): # middle units
-                    self.node_count+=1
-                    self.nodes.append(node)
-                elif isinstance(node,RessultNode): # leaf untis
-                    self.label_count+=1
-                    self.result_dict[node.value]=node
-
-        # Let's also put the tree into a matrix
-        tree_matrix_val=np.ones((self.node_count+self.label_count,4),dtype=np.int32)* -1
-
-        '''
-        0: left tree node index
-        1: right tree node index
-        2: left leaf value
-        3: right leaf value
-        '''
-        for layer in self.tree[::-1]:
-            for node in layer:
-                if isinstance(node,TreeNode):
-                    try:
-                        if not isinstance(node.left.index,str):
-                            tree_matrix_val[node.index][0]=node.left.index
-                        else:
-                            tree_matrix_val[node.index][0]=node.index
-                            tree_matrix_val[node.index][2]=int(node.left.index.split(':')[-1])
-
-                        if not isinstance(node.right.index,str):
-                            tree_matrix_val[node.index][1]=node.right.index
-                        else:
-                            tree_matrix_val[node.index][1]=node.index
-                            tree_matrix_val[node.index][3]=int(node.right.index.split(":")[-1])
-                    except:
-                        pass
-
-        self.max_route_len=0
-        for u in sorted(self.result_dict.keys()):
-            self.routes.append(self.get_route(self.result_dict[u]))
-            self.max_route_len=max(len(self.routes[-1]),self.max_route_len)
-
-        
-        self.route_node_matrix_val = np.zeros((len(self.result_dict.keys()), self.max_route_len), dtype=np.int32)
-        self.route_choice_matrix_val=np.zeros((len(self.result_dict.keys()),self.max_route_len),dtype=np.int32)
-        self.mask_matrix_val=np.zeros((len(self.result_dict.keys()),self.max_route_len),dtype=np.int32)
-
-        # Route matrix
-        # mask-matrix
-        for i,route in enumerate(self.routes):
-            for a in range(self.max_route_len):
-                try:
-                    self.route_node_matrix_val[i][a]=route[a][0].index
-                    self.route_choice_matrix_val[i][a]=route[a][1]
-                    self.mask_matrix_val[i][a]=1.0
-                except:
-                    self.route_node_matrix_val[i][a]=0
-                    self.route_choice_matrix_val[i][a]=0
-                    self.mask_matrix_val[i][a]=0.0
-
-        self.tree_matrix=theano.shared(value=tree_matrix_val,name='tree_matrix',borrow=True)
-        self.route_node_matrix=theano.shared(value=self.route_choice_matrix_val,name=self.prefix+'route_node_matrix',borrow=True)
-        self.route_choice_matrix=theano.shared(value=self.route_choice_matrix_val,name=self.prefix+'route_choice_matrix',borrow=True)
-        self.mask_matrix=theano.shared(value=self.mask_matrix_val,name=self.prefix+'route_mask_matrix',borrow=True)
-
-        # parameter_matrix_W
-        wp_val=np.asarray(self.rng.uniform(low=-np.sqrt(6./(self.in_size)),
-                                           high=np.sqrt(6./(self.in_size+2)),
-                                           size=(len(self.nodes)+1,self.in_size)),dtype=theano.config.floatX)
-        self.wp_matrix=theano.shared(value=wp_val,name="V_soft",borrow=True)
-        self.params=[self.wp_matrix,]
-
-    def build_graph(self):
-        # 1
-        nodes=self.route_node_matrix[self.y]
-        choices=self.route_choice_matrix[self.y]
-        mask=self.mask_matrix[self.y]
-        # 2.
-        wp=self.wp_matrix[nodes]
+    # One giant matrix mul
+    def matrix_build(self):
+        wp=self.wp_matrix[self.y_node]
+        node_bias=self.bias[self.y_node]
         # feature.dimshuffle(0,1,'x',2)
-        node=T.sum(wp * self.x.dimshuffle(0,1,'x',2),axis=-1)
+        node=T.sum(wp * self.x.dimshuffle(0,1,'x',2),axis=-1)+node_bias
+        #node+=node_bias
 
-        #log_sigmoid=-T.mean(T.log(T.nnet.sigmoid(node*choices))*mask,axis=-1)
-        log_sigmoid=T.mean(T.log(1+T.exp(-node*choices))*mask,axis=-1)
+        log_sigmoid=-T.sum(T.log(T.nnet.sigmoid(node*self.y_choice))*self.y_bit_mask,axis=-1)
+        #log_sigmoid=T.mean(T.log(1+T.exp(-node*self.y_choice))*self.y_bit_mask,axis=-1)
+        self.activation=T.sum(log_sigmoid*self.maskY )/self.maskY.sum()
 
-        cost=log_sigmoid*self.maskY   # matrix element-wise dot
-        self.activation=cost.sum()/self.maskY.sum()
+    # Many tiny matrix muls
+    def vector_build(self):
+        def _step(cur_node,cur_choice,cur_bit_mask,prev_logprob):
+            """
+            :param cur_node: 
+            :param cur_choice: 
+            :param cur_bit_mask: 
+            self.wp_matrix[cur_node]: [n_len,n_batch,n_hidden]
+            :param prev_logprob: [n_len,n_batch]
+            :param input_vector: [n_len,n_batch,n_hidden]
+            :return: 
+            """
+            wp=self.wp_matrix[cur_node]
+            node_bias=self.bias[cur_node]
+            node=T.sum(wp * self.x, axis=-1)+node_bias
+            #node=T.sum(self.wp_matrix[cur_node]*input_vector+self.bias[cur_node],axis=-1)
+
+            log_sigmoid=T.log(T.nnet.sigmoid(node*cur_choice))*cur_bit_mask
+            logprob=prev_logprob-log_sigmoid
+            return logprob
+        logprobs,_=theano.scan(fn=_step,
+                    sequences=[self.y_node,self.y_choice,self.y_bit_mask],
+                    outputs_info=dict(initial=T.zeros((self.x.shape[:-1]),dtype=theano.config.floatX)))
+
+        logprobs=logprobs[-1]# only the last steps of the
+
+        self.activation=T.sum(logprobs*self.maskY)/self.maskY.sum()
 
 
     def build_predict(self):
@@ -213,7 +115,7 @@ class H_Softmax(object):
         #self.label_tool=theano.function([self.x],xresult)
 
     def get_prediction_function(self):
-        return  self.predict_labels#,self.label_tool
+        return  self.predict_labels
 
     def get_route(self,node):
         route=[]
